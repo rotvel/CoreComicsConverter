@@ -12,7 +12,7 @@ namespace PdfConverter
     public class PdfImageParser : IEventListener, IDisposable
     {
         // Largest image on a given page
-        private readonly Dictionary<int, (int width, int height)> _imageMap;
+        private readonly Dictionary<int, (int width, int height, string ext)> _imageMap;
 
         private readonly List<Exception> _imageParserErrors;
 
@@ -51,10 +51,10 @@ namespace PdfConverter
 
             _imageParserErrors = new List<Exception>();
 
-            _imageMap = new Dictionary<int, (int width, int height)>();
+            _imageMap = new();
         }
 
-        public List<(int width, int height, int count)> ParseImages()
+        public void ParsePdfImages()
         {
             _supportedEvents = new[] { EventType.RENDER_IMAGE };
 
@@ -74,11 +74,12 @@ namespace PdfConverter
                 // Handle pages with no images
                 if (!_imageMap.ContainsKey(_pageNumber))
                 {
-                    _imageMap[_pageNumber] = (0, 0);
+                    _imageMap[_pageNumber] = (0, 0, null!);
                 }
 
                 PageParsed?.Invoke(this, new PageParsedEventArgs(_pageNumber));
             }
+
             _pdfComic.ImageCount = _imageCount;
 
             if (_imageMap.Count != _pdfComic.PageCount)
@@ -87,35 +88,37 @@ namespace PdfConverter
             }
 
             var imageSizesMap = BuildImageSizesMap();
-            var sortedImagesList = imageSizesMap.Values.OrderByDescending(x => x.count).AsList();
 
-            var pageSum = sortedImagesList.Sum(i => i.count);
+            var sortedImagesList = imageSizesMap.Values.OrderByDescending(x => x.Count).AsList();
+            _pdfComic.SortedImageSizes = sortedImagesList;
+
+            var pageSum = sortedImagesList.Sum(i => i.Count);
             if (pageSum != _pdfComic.PageCount)
             {
                 throw new ApplicationException($"{nameof(sortedImagesList)} pageSum {pageSum} should be {_pdfComic.PageCount}");
             }
-
-            return sortedImagesList;
         }
 
         public List<Exception> GetImageParserErrors() => _imageParserErrors;
 
-        private Dictionary<string, (int width, int height, int count)> BuildImageSizesMap()
+        private Dictionary<string, PdfImageInfo> BuildImageSizesMap()
         {
-            var imageSizesMap = new Dictionary<string, (int, int, int count)>();
+            var imageInfosMap = new Dictionary<string, PdfImageInfo>();
 
-            foreach (var (width, height) in _imageMap.Values)
+            foreach (var (width, height, ext) in _imageMap.Values)
             {
-                var key = $"{width} x {height}";
+                var key = $"{width} {height} {ext}";
 
-                var count = imageSizesMap.TryGetValue(key, out var existingImageSize)
-                    ? existingImageSize.count + 1
-                    : 1;
+                if (!imageInfosMap.TryGetValue(key, out var imageInfo))
+                {
+                    imageInfo = new PdfImageInfo { Width = width, Height = height, Ext = ext };
+                    imageInfosMap[key] = imageInfo;
+                }
 
-                imageSizesMap[key] = (width, height, count);
+                imageInfo.Count++;
             }
 
-            return imageSizesMap;
+            return imageInfosMap;
         }
 
         public event EventHandler<PageParsedEventArgs> PageParsed;
@@ -149,10 +152,12 @@ namespace PdfConverter
                 var newWidth = Convert.ToInt32(imageObject.GetWidth());
                 var newHeight = Convert.ToInt32(imageObject.GetHeight());
 
+                var newExt = imageObject.IdentifyImageFileExtension();
+
                 // We want the largest image on any given page.
                 if (!_imageMap.TryGetValue(_pageNumber, out var page) || (newWidth * newHeight > page.width * page.height))
                 {
-                    _imageMap[_pageNumber] = (newWidth, newHeight);
+                    _imageMap[_pageNumber] = (newWidth, newHeight, newExt);
                 }
 
                 _imageCount++;

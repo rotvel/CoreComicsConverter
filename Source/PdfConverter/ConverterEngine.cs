@@ -1,6 +1,7 @@
 ﻿using CbzMage.Shared.Buffers;
 using CbzMage.Shared.Extensions;
 using CbzMage.Shared.Helpers;
+using iText.IO.Image;
 using PdfConverter.Exceptions;
 using PdfConverter.Ghostscript;
 using PdfConverter.ImageProducer;
@@ -12,18 +13,18 @@ namespace PdfConverter
     {
         public void ConvertToCbz(Pdf pdf, PdfImageParser pdfParser)
         {
-            var sortedImageSizes = ParsePdfImages(pdf, pdfParser);
+            ParsePdfImages(pdf, pdfParser);
 
             // Use original images from pdf
-            if (SavePdfImages(pdf, pdfParser, sortedImageSizes))
+            if (SavePdfImages(pdf, pdfParser))
             {
                 return;
             }
 
-            var wantedWidth = GetWantedWidth(pdf, sortedImageSizes);
+            var wantedWidth = GetWantedWidth(pdf);
 
             var (dpi, dpiHeight) = CalculateDpiForWantedWidth(pdf, wantedWidth);
-            var adjustedHeight = GetAdjustedHeight(pdf, sortedImageSizes, dpiHeight);
+            var adjustedHeight = GetAdjustedHeight(pdf, dpiHeight);
 
             var pageLists = CreatePageLists(pdf);
             var imageProducers = new List<AbstractImageProducer>();
@@ -42,31 +43,47 @@ namespace PdfConverter
             }
         }
 
-        private static List<(int width, int height, int count)> ParsePdfImages(Pdf pdf, PdfImageParser pdfImageParser)
+        private static void ParsePdfImages(Pdf pdf, PdfImageParser pdfImageParser)
         {
             var progressReporter = new ProgressReporter(pdf.PageCount);
 
             pdfImageParser.PageParsed += (s, e) => progressReporter.ShowProgress($"Parsing page-{e.CurrentPage}");
 
-            var sortedImageSizes = pdfImageParser.ParseImages();
+            pdfImageParser.ParsePdfImages();
             progressReporter.EndProgress();
 
             Console.WriteLine($"{pdf.ImageCount} images");
 
             var parserErrors = pdfImageParser.GetImageParserErrors();
             parserErrors.ForEach(ex => Console.WriteLine(ex.TypeAndMessage()));
-
-            return sortedImageSizes;
         }
 
-        private static bool SavePdfImages(Pdf pdf, PdfImageParser pdfImageParser, List<(int width, int height, int count)> sortedImageSizes)
+        private static class ValidImageType
+        {
+            public static readonly string Jpg = ImageType.JPEG.ToString();
+            public static readonly string Png = ImageType.PNG.ToString();
+        }
+
+        private static bool SavePdfImages(Pdf pdf, PdfImageParser pdfImageParser)
         {
             Console.Write("Use original images: ");
 
             // Saving original images from pdf requires each page has exactly one image
-            if (pdf.ImageCount != pdf.PageCount
-                // Detect page without an image.
-                || sortedImageSizes.Any(i => i.width == 0))
+            if (pdf.ImageCount != pdf.PageCount)
+            {
+                ProgressReporter.Info("not available");
+                return false;
+            }
+
+            // Detect page without an image.
+            if (pdf.SortedImageSizes.Any(i => i.Width == 0))
+            {
+                ProgressReporter.Info("not available");
+                return false;
+            }
+
+            // Only deal with common imagetypes (avoid jp2 etc).
+            if (pdf.SortedImageSizes.All(i => i.Ext == ValidImageType.Jpg) || pdf.SortedImageSizes.All(i => i.Ext == ValidImageType.Png))
             {
                 ProgressReporter.Info("not available");
                 return false;
@@ -75,6 +92,9 @@ namespace PdfConverter
             try
             {
                 // Disable saving original images if pdf contains any text to render
+
+                //TODO: Check this at image parsing phase?
+
                 if (pdfImageParser.DetectRenderedText())
                 {
                     ProgressReporter.Info("not available");
@@ -103,25 +123,25 @@ namespace PdfConverter
             return true;
         }
 
-        private static int GetWantedWidth(Pdf pdf, List<(int width, int height, int count)> sortedImageSizes)
+        private static int GetWantedWidth(Pdf pdf)
         {
-            var mostOfThisSize = sortedImageSizes.First();
+            var mostOfThisSize = pdf.SortedImageSizes.First();
 
-            var padLen = mostOfThisSize.count.ToString().Length;
+            var padLen = mostOfThisSize.Count.ToString().Length;
             var cutOff = pdf.PageCount / 20;
 
-            foreach (var (width, height, count) in sortedImageSizes.TakeWhile(x => x.width > 0 && x.count > cutOff))
+            foreach (var imageInfo in pdf.SortedImageSizes.TakeWhile(x => x.Width > 0 && x.Count > cutOff))
             {
-                Console.WriteLine($"  {count.ToString().PadLeft(padLen, ' ')}: {width} x {height}");
+                Console.WriteLine($"  {imageInfo.Count.ToString().PadLeft(padLen, ' ')}: {imageInfo.Width} x {imageInfo.Height}");
             }
 
-            return mostOfThisSize.width;
+            return mostOfThisSize.Width;
         }
 
-        private static int? GetAdjustedHeight(Pdf pdf, List<(int width, int height, int count)> sortedImageSizes, int dpiHeight)
+        private static int? GetAdjustedHeight(Pdf pdf, int dpiHeight)
         {
             // The height of the image with the largest page count
-            var realHeight = sortedImageSizes.First().height;
+            var realHeight = pdf.SortedImageSizes.First().Height;
 
             // Check if the calculated wanted height is (much) larger than the real height
             var factor = 1.25;
@@ -131,14 +151,14 @@ namespace PdfConverter
             {
                 // Get images sorted by height but only if their count is above the cutoff
                 var cutOff = pdf.PageCount / 20;
-                var sortedByHeight = sortedImageSizes.Where(x => x.count > cutOff).OrderByDescending(x => x.height);
+                var sortedByHeight = pdf.SortedImageSizes.Where(x => x.Count > cutOff).OrderByDescending(x => x.Height);
 
                 // If there's not any images with a count above the cutoff calculate the
                 // average height and use that instead.
                 var firstSortedHeight = sortedByHeight.FirstOrDefault();
                 var largestRealHeight = firstSortedHeight != default
-                    ? firstSortedHeight.height
-                    : (int)sortedImageSizes.Average(x => x.height);
+                    ? firstSortedHeight.Height
+                    : (int)pdf.SortedImageSizes.Average(x => x.Height);
 
                 // Don't set the new height too low.
                 var adjustedHeight = Math.Max(largestRealHeight, Settings.MinimumHeight);
